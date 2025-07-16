@@ -168,116 +168,133 @@ def complex_matrix_multiplication(u, s, v):
     return h_real, h_imag
 
 
-def train_model(model, train_data, train_label, device, epochs=50, batch_size=128, patience=5,
-                model_save_path='best_model.pth'):
+def train_model(model, train_data_list, train_label_list, device,
+                           epochs_per_round=50, batch_size=128, patience=5,
+                           model_save_path='final_model.pth'):
     """
-    高效训练函数（带进度监控和早停机制）
+    多轮数据训练函数（轮流训练多组数据）
 
     参数:
         model: 待训练模型
-        train_data: 训练数据 [samp_num, M, N, 2]
-        train_label: 训练标签 [samp_num, M, N, 2]
+        train_data_list: 训练数据列表 [data1, data2, data3]
+        train_label_list: 训练标签列表 [label1, label2, label3]
         device: 训练设备
-        epochs: 训练轮数
+        epochs_per_round: 每轮数据的训练轮数
         batch_size: 批大小
         patience: 早停机制等待轮数
-        model_save_path: 最佳模型保存路径
+        model_save_path: 最终模型保存路径
     """
     from torch.utils.data import TensorDataset, DataLoader
 
-    # 准备数据
-    dataset = TensorDataset(
-        torch.tensor(train_data, dtype=torch.float32),
-        torch.tensor(train_label, dtype=torch.float32)
-    )
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+    # 训练多轮数据
+    for round_idx, (train_data, train_label) in enumerate(zip(train_data_list, train_label_list)):
+        print(f"\n{'=' * 50}")
+        print(f"Starting Training for Round {round_idx + 1}/{len(train_data_list)}")
+        print(f"Training samples: {train_data.shape[0]}")
+        print(f"Channel matrix size: {train_data.shape[1]}x{train_data.shape[2]}")
+        print(f"{'=' * 50}\n")
 
-    model.train()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+        # 准备数据
+        dataset = TensorDataset(
+            torch.tensor(train_data, dtype=torch.float32),
+            torch.tensor(train_label, dtype=torch.float32)
+        )
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
 
-    best_loss = float('inf')
-    epochs_without_improvement = 0
+        model.train()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
 
-    # 训练循环
-    for epoch in range(epochs):
-        total_loss = 0.0
-        total_recon_loss = 0.0
-        total_ortho_loss = 0.0
+        best_loss = float('inf')
+        epochs_without_improvement = 0
 
-        # 使用tqdm创建进度条
-        batch_iterator = tqdm(dataloader, desc=f'Epoch {epoch + 1}/{epochs}', unit='batch', leave=True)
+        # 训练循环
+        for epoch in range(epochs_per_round):
+            total_loss = 0.0
+            total_recon_loss = 0.0
+            total_ortho_loss = 0.0
 
-        for batch_idx, (inputs, labels) in enumerate(batch_iterator):
-            inputs, labels = inputs.to(device), labels.to(device)
+            # 使用tqdm创建进度条
+            batch_iterator = tqdm(dataloader, desc=f'Round {round_idx + 1} - Epoch {epoch + 1}/{epochs_per_round}',
+                                  unit='batch', leave=True)
 
-            # 前向传播
-            u, s, v = model(inputs)
+            for batch_idx, (inputs, labels) in enumerate(batch_iterator):
+                inputs, labels = inputs.to(device), labels.to(device)
 
-            # 重构信道矩阵
-            h_real, h_imag = complex_matrix_multiplication(u, s, v)
-            h_recon = torch.stack([h_real, h_imag], dim=-1)
+                # 前向传播
+                u, s, v = model(inputs)
 
-            # 计算损失
-            recon_loss = F.mse_loss(h_recon, labels)
-            ortho_loss = orthogonal_constraint(u, v)
-            loss = recon_loss + 0.02 * ortho_loss  # 减小正交约束权重
+                # 重构信道矩阵
+                h_real, h_imag = complex_matrix_multiplication(u, s, v)
+                h_recon = torch.stack([h_real, h_imag], dim=-1)
 
-            # 反向传播
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # 梯度裁剪
-            optimizer.step()
+                # 计算损失
+                recon_loss = F.mse_loss(h_recon, labels)
+                ortho_loss = orthogonal_constraint(u, v)
+                loss = recon_loss + 0.02 * ortho_loss  # 减小正交约束权重
 
-            # 更新损失统计
-            total_loss += loss.item()
-            total_recon_loss += recon_loss.item()
-            total_ortho_loss += ortho_loss.item()
+                # 反向传播
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # 梯度裁剪
+                optimizer.step()
 
-            # 实时更新进度条描述
-            avg_recon = total_recon_loss / (batch_idx + 1)
-            avg_ortho = total_ortho_loss / (batch_idx + 1)
-            avg_loss = total_loss / (batch_idx + 1)
+                # 更新损失统计
+                total_loss += loss.item()
+                total_recon_loss += recon_loss.item()
+                total_ortho_loss += ortho_loss.item()
 
-            batch_iterator.set_postfix({
-                'loss': f'{loss.item():.6f}',
-                'avg_loss': f'{avg_loss:.6f}',
-                'recon': f'{recon_loss.item():.6f}',
-                'ortho': f'{ortho_loss.item():.6f}'
-            })
+                # 实时更新进度条描述
+                avg_recon = total_recon_loss / (batch_idx + 1)
+                avg_ortho = total_ortho_loss / (batch_idx + 1)
+                avg_loss = total_loss / (batch_idx + 1)
 
-        # 计算本轮平均损失
-        avg_recon_loss = total_recon_loss / len(dataloader)
-        avg_ortho_loss = total_ortho_loss / len(dataloader)
-        avg_loss = total_loss / len(dataloader)
+                batch_iterator.set_postfix({
+                    'loss': f'{loss.item():.6f}',
+                    'avg_loss': f'{avg_loss:.6f}',
+                    'recon': f'{recon_loss.item():.6f}',
+                    'ortho': f'{ortho_loss.item():.6f}'
+                })
 
-        # 更新学习率
-        scheduler.step(avg_loss)
+            # 计算本轮平均损失
+            avg_recon_loss = total_recon_loss / len(dataloader)
+            avg_ortho_loss = total_ortho_loss / len(dataloader)
+            avg_loss = total_loss / len(dataloader)
 
-        if scheduler.num_bad_epochs > 0 and scheduler.num_bad_epochs % scheduler.patience == 0:
-            print(f"  Learning rate reduced from {optimizer.param_groups[0]['lr'] / (scheduler.factor):.6f} to {optimizer.param_groups[0]['lr']:.6f}")
+            # 更新学习率
+            scheduler.step(avg_loss)
 
-        # 打印本轮摘要
-        print(f"\nEpoch {epoch + 1}/{epochs} Summary:")
-        print(f"  Avg Loss: {avg_loss:.6f}")
-        print(f"  Avg Recon Loss: {avg_recon_loss:.6f}")
-        print(f"  Avg Ortho Loss: {avg_ortho_loss:.6f}")
-        print(f"  Learning Rate: {optimizer.param_groups[0]['lr']:.8f}")
+            if scheduler.num_bad_epochs > 0 and scheduler.num_bad_epochs % scheduler.patience == 0:
+                print(
+                    f"  Learning rate reduced from {optimizer.param_groups[0]['lr'] / (scheduler.factor):.6f} to {optimizer.param_groups[0]['lr']:.6f}")
 
-        # 早停机制检查
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            epochs_without_improvement = 0
-            # 保存最佳模型
-            torch.save(model.state_dict(), model_save_path)
-            print(f"  Best model saved to {model_save_path}")
-        else:
-            epochs_without_improvement += 1
-            print(f"  No improvement for {epochs_without_improvement}/{patience} epochs")
+            # 打印本轮摘要
+            print(f"\nRound {round_idx + 1} - Epoch {epoch + 1}/{epochs_per_round} Summary:")
+            print(f"  Avg Loss: {avg_loss:.6f}")
+            print(f"  Avg Recon Loss: {avg_recon_loss:.6f}")
+            print(f"  Avg Ortho Loss: {avg_ortho_loss:.6f}")
+            print(f"  Learning Rate: {optimizer.param_groups[0]['lr']:.8f}")
 
-            # 检查是否需要提前停止
-            if epochs_without_improvement >= patience:
-                print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
-                break
+            # 早停机制检查
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                print(f"  No improvement for {epochs_without_improvement}/{patience} epochs")
+
+                # 检查是否需要提前停止
+                if epochs_without_improvement >= patience:
+                    print(f"\nEarly stopping triggered after {epoch + 1} epochs!")
+                    break
+
+        print(f"\n{'=' * 50}")
+        print(f"Completed Training for Round {round_idx + 1}/{len(train_data_list)}")
+        print(f"Final Loss: {avg_loss:.6f}")
+        print(f"{'=' * 50}")
+
+    # 保存最终模型
+    torch.save(model.state_dict(), model_save_path)
+    print(f"\nFinal model saved to {model_save_path}")
 
     return model
