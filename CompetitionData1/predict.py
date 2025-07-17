@@ -1,10 +1,12 @@
 import os
 import numpy as np
 import torch
-from solution import SVDNet
+from basesolution import SVDNet
 from utils.data_loader import read_cfg_file, load_test_data, get_data_paths
 from config import get_device, get_case_ids
 
+
+Ridx=1
 
 def predict(model, test_data, device, batch_size=32):
     """批量预测函数"""
@@ -63,7 +65,7 @@ def main():
 
         # 初始化模型
         model = SVDNet(M, N, R).to(device)
-        model_path = f'model_round{Ridx}_case{case_id}.pth'
+        model_path = f'best_model.pth'
 
         # 加载模型权重（如果存在）
         if os.path.exists(model_path):

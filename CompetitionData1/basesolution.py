@@ -3,31 +3,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
+batch_size = 128
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
 class SVDNet(nn.Module):
-    """无线鲁棒SVD网络"""
-
-    def __init__(self, M, N, R, feature_dim=16):
+    def __init__(self):
         """
-        初始化轻量级SVD网络
-
-        参数:
-            M: 信道矩阵行数
-            N: 信道矩阵列数
-            R: 目标奇异值数量
-            feature_dim: 特征维度，默认16
+        符合比赛平台要求的SVD网络实现
+        - 无参初始化：支持 model = SVDNet()
+        - 固定输入输出尺寸：64x64 MIMO矩阵，输出32个奇异值
         """
         super(SVDNet, self).__init__()
-        self.M = M
-        self.N = N
-        self.R = R
+        # 固定参数设置
+        self.M = 64  # 固定行数
+        self.N = 64  # 固定列数
+        self.R = 32  # 固定奇异值数量
+        feature_dim = 16
 
-        # 简化的特征提取层
+        # 特征提取层
         self.feature_extractor = nn.Sequential(
-            nn.Conv2d(2, 8, kernel_size=3, padding=1),  # 输入: [batch, 2, M, N]
+            nn.Conv2d(2, 8, kernel_size=3, padding=1),
             nn.BatchNorm2d(8),
             nn.ReLU(inplace=True),
-
-            # 深度可分离卷积减少计算量
             nn.Conv2d(8, 8, kernel_size=3, padding=1, groups=8),
             nn.Conv2d(8, feature_dim, kernel_size=1),
             nn.BatchNorm2d(feature_dim),
@@ -35,80 +36,81 @@ class SVDNet(nn.Module):
         )
 
         # U分支：输出左奇异矩阵
-        self.u_branch = nn.Sequential(
-            nn.Conv2d(feature_dim, 2 * R, kernel_size=1),
-            nn.ReLU(inplace=True)
-        )
+        self.u_branch = nn.Conv2d(feature_dim, 2 * self.R, kernel_size=1)
 
         # S分支：输出奇异值向量
         self.s_branch = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),  # 全局平均池化
+            nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(feature_dim, R),  # 直接输出奇异值
-            nn.ReLU()
+            nn.Linear(feature_dim, self.R)
         )
 
         # V分支：输出右奇异矩阵
-        self.v_branch = nn.Sequential(
-            nn.Conv2d(feature_dim, 2 * R, kernel_size=1),
-            nn.ReLU(inplace=True)
-        )
-
-        # 计算乘加操作次数(MACs)
-        self.macs = self.calculate_macs(M, N, R, feature_dim)
-
-    def calculate_macs(self, M, N, R, feature_dim):
-        """计算模型前向传播的乘加次数"""
-        macs = 0
-
-        # 输入卷积层
-        macs += M * N * 3 * 3 * 2 * 8  # Conv1: [2,8,K=3]
-
-        # 深度可分离卷积
-        macs += M * N * 3 * 3 * 8  # Depthwise conv
-        macs += M * N * 1 * 1 * 8 * feature_dim  # Pointwise conv
-
-        # 分支层
-        macs += M * N * 1 * 1 * feature_dim * (2 * R) * 2  # U和V分支
-        macs += feature_dim * R  # S分支全连接层
-
-        return macs
+        self.v_branch = nn.Conv2d(feature_dim, 2 * self.R, kernel_size=1)
 
     def forward(self, x):
         """
-        前向传播
+        前向传播 (兼容单样本和批量输入)
 
-        参数:
-            x: 输入张量 [batch, M, N, 2]
+        输入:
+          - 单样本: [M, N, 2] = [64, 64, 2]
+          - 批量样本: [batch, M, N, 2] = [batch, 64, 64, 2]
 
-        返回:
-            u: 左奇异矩阵 [batch, M, R, 2]
-            s: 奇异值向量 [batch, R]
-            v: 右奇异矩阵 [batch, N, R, 2]
+        输出:
+          u: [64, 32, 2] 或 [batch, 64, 32, 2]
+          s: [32] 或 [batch, 32]
+          v: [64, 32, 2] 或 [batch, 64, 32, 2]
         """
-        # 输入转换: [batch, M, N, 2] -> [batch, 2, M, N]
+        # 处理单样本输入
+        if x.dim() == 3:
+            batch_size = 1
+            x = x.unsqueeze(0)  # 增加batch维度 [1, 64, 64, 2]
+        else:
+            batch_size = x.size(0)
+
+        # 输入转换: [batch, 64, 64, 2] -> [batch, 2, 64, 64]
         x = x.permute(0, 3, 1, 2)
 
         # 特征提取
         features = self.feature_extractor(x)
 
         # U分支处理
-        u = self.u_branch(features)  # [batch, 2*R, M, N]
-        u = u.permute(0, 2, 3, 1)  # [batch, M, N, 2*R]
-        u = u.reshape(-1, self.M, self.N, self.R, 2)  # 拆分为奇异向量
-        u = u.mean(dim=2)  # 合并N维度 -> [batch, M, R, 2]
+        u = self.u_branch(features)
+        u = u.permute(0, 2, 3, 1)
+        u = u.reshape(batch_size, 64, 64, self.R, 2)
+        u = u.mean(dim=2)  # [batch, 64, 32, 2]
 
         # S分支处理
-        s = self.s_branch(features)  # [batch, R]
+        s = self.s_branch(features)  # [batch, 32]
 
         # V分支处理
-        v = self.v_branch(features)  # [batch, 2*R, M, N]
-        v = v.permute(0, 3, 2, 1)  # [batch, N, M, 2*R]
-        v = v.reshape(-1, self.N, self.M, self.R, 2)  # 拆分为奇异向量
-        v = v.mean(dim=2)  # 合并M维度 -> [batch, N, R, 2]
+        v = self.v_branch(features)
+        v = v.permute(0, 2, 3, 1)
+        v = v.reshape(batch_size, 64, 64, self.R, 2)
+        v = v.mean(dim=2)  # [batch, 64, 32, 2]
+
+        # 归一化处理
+        u = self.normalize_columns(u)
+        v = self.normalize_columns(v)
+
+        # 如果是单样本，移除batch维度
+        if batch_size == 1:
+            u = u.squeeze(0)
+            s = s.squeeze(0)
+            v = v.squeeze(0)
 
         return u, s, v
 
+    def normalize_columns(self, mat):
+        """
+        列向量归一化
+        """
+        real = mat[..., 0]
+        imag = mat[..., 1]
+        norm = torch.sqrt(real ** 2 + imag ** 2 + 1e-8)
+        real_norm = real / norm
+        imag_norm = imag / norm
+        return torch.stack([real_norm, imag_norm], dim=-1)
 
 def orthogonal_constraint(u, v):
     """
@@ -132,6 +134,7 @@ def orthogonal_constraint(u, v):
 
         # 目标: 单位矩阵
         identity = torch.eye(prod_real.size(1), device=matrix.device).unsqueeze(0)
+        identity = identity.expand(batch_size, -1, -1)  # [batch_size, R, R]
         return F.mse_loss(prod_real, identity)
 
     return orth_loss(u) + orth_loss(v)
@@ -298,3 +301,4 @@ def train_model(model, train_data_list, train_label_list, device,
     print(f"\nFinal model saved to {model_save_path}")
 
     return model
+

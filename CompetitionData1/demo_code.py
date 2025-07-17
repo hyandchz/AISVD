@@ -1,6 +1,6 @@
 import os
 import numpy as np
-from solution import SVDNet
+from basesolution import SVDNet
 import torch
 
 # 读取配置文件函数
@@ -22,7 +22,7 @@ if __name__ == "__main__":
     PathSet = {0: "./DebugData", 1: "./CompetitionData1", 2: "./CompetitionData2", 3: "./CompetitionData3"}
     PrefixSet = {0: "Round0", 1: "Round1", 2: "Round2", 3: "Round3"}
  
-    Ridx = 0  # 设置比赛轮次索引，指明数据存放目录。0:Test; 1: 1st round; 2: 2nd round ...
+    Ridx = 1  # 设置比赛轮次索引，指明数据存放目录。0:Test; 1: 1st round; 2: 2nd round ...
     PathRaw = PathSet[Ridx]
     Prefix = PrefixSet[Ridx]
    
